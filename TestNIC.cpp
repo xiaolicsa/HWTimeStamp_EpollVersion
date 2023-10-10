@@ -1,5 +1,5 @@
 #include "TestNIC.h"
-
+//可以对从以太网进入p0的捕获到硬件时间戳
 namespace TestNIC
 {
 	void TestNIC::EnableTimestamping(int sock)
@@ -42,7 +42,7 @@ namespace TestNIC
 		char buffer[4000]; // Data Buffer
 
 		host_address.sin_family = AF_INET;
-		host_address.sin_port = htons(15516);
+		host_address.sin_port = htons(ETH_P_IP);
 		host_address.sin_addr.s_addr = INADDR_ANY;
 
 		msg.msg_namelen = sizeof(struct sockaddr_in); // Needs to be set each call
@@ -57,8 +57,8 @@ namespace TestNIC
 		msg.msg_controllen = 1024; // Needs to be set each call
 
 		// Do a recvmsg()
-		ssize_t bytes_rcvd = recvmsg(sock, &msg, flags);
-
+		ssize_t bytes_rcvd = recvmsg(sock, &msg, MSG_DONTWAIT);
+		std::cout<<"---------------------start---------------"<<std::endl;
 		std::cout << "Bytes received = " << bytes_rcvd << std::endl;
 		std::cout << "Length of CMSGs = " << msg.msg_controllen << std::endl;
 		std::cout << "Message flags: " << msg.msg_flags << std::endl;
@@ -79,7 +79,7 @@ namespace TestNIC
 				std::cout << "[nsec = " << ts->tv_nsec << "]" << std::endl;
 			}
 
-			if (cmsg->cmsg_type == 37) // SO_TIMESTAMPING
+			if (cmsg->cmsg_type == 37) // SO_TIMESTAMPING ？只有这一种包？
 			{
 				struct timespec *ts = (struct timespec *)CMSG_DATA(cmsg);
 				std::cout << "SO_TIMESTAMPING:" << std::endl;
@@ -92,82 +92,99 @@ namespace TestNIC
 
 				std::cout << "RAW Timespec [sec = " << ts[2].tv_sec << "]";
 				std::cout << "[nsec = " << ts[2].tv_nsec << "]" << std::endl; // 2 = HW Raw
-			}
-		}
 
+				
+			}
+			
+
+		}
+			struct ethhdr *eth_header;
+			struct ip *ip_header;
+			struct tcphdr *tcp_header;
+			struct udphdr *udp_header;
+			struct icmphdr *icmp_header;
+			eth_header = (struct ethhdr *)buffer;
+            uint16_t eth_type = ntohs(eth_header->h_proto);
+
+            // 根据以太网帧类型判断数据包类型
+            if (eth_type == ETH_P_IP) {
+                ip_header = (struct ip *)(buffer + sizeof(struct ethhdr));
+                int ip_protocol = ip_header->ip_p;
+
+                if (ip_protocol == IPPROTO_TCP) {
+                    tcp_header = (struct tcphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct ip));
+                    printf("Received TCP packet\n");
+                } else if (ip_protocol == IPPROTO_UDP) {
+                    udp_header = (struct udphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct ip));
+                    printf("Received UDP packet\n");
+                }  else if (ip_protocol == IPPROTO_ICMP) {
+                    icmp_header = (struct icmphdr *)(buffer + sizeof(struct ethhdr) + sizeof(struct ip));
+                    printf("Received ICMP packet\n");
+                } 
+                else {
+                    printf("Received IP packet with unknown protocol\n");
+                }
+            } else {
+                printf("Received non-IP packet\n");
+            }
+		std::cout<<"---------------------end---------------"<<std::endl;
 
 	}
 
-	void TestNIC::ListenMulticast(std::string local_ip)
-	{
-		// Create the buffer
-		read_buffer = new char[1000];
-		const std::string group_ip = "233.37.54.162";
-		const int port = 15516;
+	void TestNIC::ListenMulticast(std::string device){
+		int sockfd;
+		struct sockaddr_ll sll;
+		char buffer[65536];  // 缓冲区大小
 
-		// Create a UDP socket and listen for packets
-		m_udp_feed = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-		if (m_udp_feed < 0)
-		{
-			std::cout << "socket creation failed" << std::endl;
-			throw new std::runtime_error("KRX socket creation failed");
+		// 创建原始套接字
+		sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+		if (sockfd < 0) {
+			perror("Socket creation error");
+			return ;
 		}
 
-		std::cout << "Created socket [fd = " << m_udp_feed << "]" << std::endl;
+		// 设置套接字选项，指定捕获的网卡
+		int idx = if_nametoindex(device.c_str());
+		sll.sll_family = AF_PACKET;
+		sll.sll_protocol = htons(ETH_P_ALL);
+		sll.sll_ifindex = idx;
 
-		// Enable SO_REUSEADDR to allow multiple instances of this
-		// application to receive copies of the multicast datagrams.
-		if (true)
-		{
-			int reuse = 1;
-			setsockopt(m_udp_feed, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse));
-			std::cout << "Reuse address" << std::endl;
+		if (bind(sockfd, (struct sockaddr *)&sll, sizeof(sll)) < 0) {
+			perror("Binding error");
+			return ;
 		}
-
-		// http://stackoverflow.com/questions/9243292/subscribing-to-multiple-multicast-groups-on-one-socket-linux-c
-
-		// Bind to the multicast port
-		struct sockaddr_in host_address;
-		memset(&host_address, 0, sizeof(host_address));
-		host_address.sin_family = AF_INET;
-
-		// Bind to the *GROUP* address in the case of multicast UDP.
-		host_address.sin_addr.s_addr = inet_addr(group_ip.c_str()); // Linux
-		host_address.sin_port = htons(port);
-
-		// Using bind from the global namespace, not std::bind
-		int rc = ::bind(m_udp_feed, (struct sockaddr*)&host_address, sizeof(host_address));
-		if (rc < 0)
+		struct ifreq iface;
+		snprintf(iface.ifr_name, IFNAMSIZ, "%s", device.c_str());
+		devicename=(char *)device.c_str();
+		if (setsockopt(sockfd, SOL_SOCKET, SO_BINDTODEVICE, &iface, sizeof(iface)) < 0)
 		{
-			std::cout << "Socket binding failed" << std::endl;
-			throw new std::runtime_error("Socket binding failed");
+			
+			perror("setsockopt(SO_BINDTODEVICE) error");
+			return ;
 		}
+		
+		m_udp_feed=sockfd;
+		// EnableTimestamping(m_udp_feed);
+		struct ifreq ifr;
+		struct hwtstamp_config config;
 
-		std::cout << "Bound" << std::endl;
+		config.flags = 0;
+		config.tx_type = 1;
+		config.rx_filter = 1;
+		snprintf(ifr.ifr_name, IFNAMSIZ, "%s", device.c_str());
+		ifr.ifr_data = (caddr_t)&config;
 
-		// Join the Multicast Group
-		// For the machine to receive multicast packets, I needed to allow IP forwarding
-		// and disable rp_filter, both in /etc/sysctl.conf
-		ip_mreq request;
-		request.imr_multiaddr.s_addr = inet_addr(group_ip.c_str());
-		request.imr_interface.s_addr = inet_addr(local_ip.c_str());
-
-		std::cout << "About to join Multicast group [group = " << group_ip << "]" << std::endl;
-
-		int am = setsockopt(m_udp_feed, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&request, sizeof(request));
-		if (am < 0)
+		if (ioctl(sockfd, SIOCSHWTSTAMP, &ifr)) {
+			perror("ioctl");
+			return ;
+		}
+		int hwts_rp =  SOF_TIMESTAMPING_RX_HARDWARE|SOF_TIMESTAMPING_TX_HARDWARE| SOF_TIMESTAMPING_RAW_HARDWARE;
+		if (setsockopt(sockfd, SOL_SOCKET, SO_TIMESTAMPING, &hwts_rp, sizeof(hwts_rp)) < 0)
 		{
-			std::cout << "Failed to join Multicast group :: "
-				<< group_ip << " on " << local_ip;
-			throw new std::runtime_error("Failed to join Multicast group");
+			printf("error setsockopt(SO_TIMESTAMPING): %s\n", strerror(errno));
+			return ;
 		}
-		std::cout << "Return code to join multicastgroup [rc = " << rc << "]" << std::endl;
-
-		// Success!
-		std::cout << "Socket created, listening on " << group_ip << ":" << port;
-		std::cout << " [fd = " << m_udp_feed << "]" << std::endl;
-		std::cout << "Trying to enable timestamps ..." << std::endl;
-		EnableTimestamping(m_udp_feed);
+	return ;
 	}
 
 	void TestNIC::DoEventLoop()
@@ -182,14 +199,14 @@ namespace TestNIC
 		std::cout << "epoll created [epfd = " << epfd << "]" << std::endl;
 
 		evt.data.fd = m_udp_feed;
-		evt.events = EPOLLIN | EPOLLET;
+		evt.events = EPOLLIN;
 		int rc = epoll_ctl(epfd, EPOLL_CTL_ADD, m_udp_feed, &evt);
 
 		std::cout << "Added socket to epoll" << std::endl;
 
 		while (true)
 		{
-			int rc = epoll_wait(epfd, &evt, 1, 5000 /* milliseconds */);
+			int rc = epoll_wait(epfd, &evt, 1, -1);
 
 			if (rc > 0)
 			{
@@ -207,6 +224,9 @@ namespace TestNIC
 			}
 
 		} // while (true)
+
+
+
 	}
 
 }
